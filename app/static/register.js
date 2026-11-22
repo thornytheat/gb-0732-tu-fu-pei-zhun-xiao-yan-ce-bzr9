@@ -6,7 +6,7 @@ const form = byId('run-form');
 const sign = byId('signature-form');
 const links = [...document.querySelectorAll('[data-section]')];
 const state = {snapshot: null, catalog: null, preview: null, section: null, selected: null, edgeId: null,
-  busy: false, signing: false, previewToken: 0, reused: false};
+  busy: false, signing: false, previewToken: 0, reused: false, dispatch: null, closer: ''};
 const formatTime = new Intl.DateTimeFormat('zh-CN', {timeZone: 'Asia/Shanghai', dateStyle: 'medium', timeStyle: 'medium'});
 const sides = {N: '北', E: '东', S: '南', W: '西'};
 
@@ -34,6 +34,7 @@ const post = (url, payload) => request(url, {method: 'POST', headers: {'Content-
 
 function feedback(id, message) {
   const node = byId(id);
+  if (!node) return;
   node.textContent = message || '';
   node.hidden = !message;
 }
@@ -94,7 +95,8 @@ function renderSeamIndex() {
 }
 
 function renderSign() {
-  const eligible = state.snapshot?.reviews.filter(row => row.status === 'READY' &&
+  const openSheets = new Set(state.dispatch?.open_sheets || []);
+  const eligible = state.snapshot?.reviews.filter(row => row.status === 'READY' && !openSheets.has(row.code) &&
     !state.snapshot.signatures.some(signature => signature.sheet === row.code)) || [];
   sign.hidden = state.section !== 'review' || !eligible.length;
   const options = byId('signature-sheet');
@@ -123,6 +125,8 @@ function showSnapshot(snapshot) {
   state.snapshot = snapshot;
   state.catalog = snapshot.catalog;
   state.preview = null;
+  state.dispatch = null;
+  state.closer = '';
   if (state.selected && !snapshot.refit.sheets[state.selected]) state.selected = null;
   if (!snapshot.seams.edges.some(edge => edge.code === state.edgeId)) state.edgeId = snapshot.seams.edges[0]?.code;
   const ledger = snapshot.ledger.controls;
@@ -145,6 +149,60 @@ function showSnapshot(snapshot) {
   renderSeamIndex();
   plot();
   renderDetail();
+  loadDispatch(manifest.run_id);
+}
+
+async function loadDispatch(runId) {
+  try {
+    const booklet = await request(`/api/review/runs/${runId}/dispatch`);
+    if (state.snapshot?.manifest.run_id !== runId) return;
+    state.dispatch = booklet;
+  } catch {
+    if (state.snapshot?.manifest.run_id !== runId) return;
+    state.dispatch = null;
+  }
+  if (state.section === 'dispatch') renderDetail();
+  renderSign();
+}
+
+async function generateDispatch() {
+  if (state.busy || !state.snapshot) return;
+  state.busy = true;
+  feedback('dispatch-error', null);
+  try {
+    const booklet = await post(`/api/review/runs/${state.snapshot.manifest.run_id}/dispatch`, {});
+    state.dispatch = booklet;
+    byId('run-state').textContent = booklet.reused ? '已复用本批派工册 · 未新增' : '本批派工册已生成';
+    renderDetail();
+    renderSign();
+  } catch (error) {
+    feedback('dispatch-error', error.message);
+  } finally {
+    state.busy = false;
+  }
+}
+
+async function closeOrder(orderId) {
+  if (state.busy || !state.snapshot) return;
+  const closer = state.closer.trim();
+  if (!closer) {
+    feedback('dispatch-error', '请先填写核对人，再登记关闭。');
+    byId('closer-name')?.focus();
+    return;
+  }
+  state.busy = true;
+  feedback('dispatch-error', null);
+  try {
+    const runId = state.snapshot.manifest.run_id;
+    state.dispatch = await post(`/api/review/runs/${runId}/dispatch/${orderId}/closure`, {closer});
+    byId('run-state').textContent = `派工单 ${orderId} 已关闭`;
+    renderDetail();
+    renderSign();
+  } catch (error) {
+    feedback('dispatch-error', error.message);
+  } finally {
+    state.busy = false;
+  }
 }
 
 async function readIndex() {
@@ -169,7 +227,7 @@ async function selectSection(section, focus = false) {
   renderDetail();
   if (focus) byId('detail-title').focus({preventScroll: true});
   if (focus) byId('section-detail').scrollIntoView({block: 'start'});
-  if (state.snapshot || section === 'review' || !form.reportValidity()) return;
+  if (state.snapshot || section === 'review' || section === 'dispatch' || !form.reportValidity()) return;
   byId('detail-content').replaceChildren(el('p', '正在校验该章节。'));
   try {
     const value = await request(`/api/${section}?${new URLSearchParams(parameters())}`);
@@ -265,6 +323,15 @@ form.addEventListener('change', () => {
   }
 });
 byId('print').addEventListener('click', () => window.print());
+byId('detail-content').addEventListener('click', event => {
+  const action = event.target.closest('[data-action]');
+  if (!action) return;
+  if (action.dataset.action === 'generate-dispatch') generateDispatch();
+  if (action.dataset.action === 'close-order') closeOrder(action.dataset.order);
+});
+byId('detail-content').addEventListener('input', event => {
+  if (event.target.id === 'closer-name') state.closer = event.target.value;
+});
 let frame;
 const redraw = () => {
   cancelAnimationFrame(frame);

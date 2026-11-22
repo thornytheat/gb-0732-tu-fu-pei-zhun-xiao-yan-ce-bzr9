@@ -37,8 +37,11 @@ Compose 将批次与签审保存到 `register-data` 命名卷。需要空册时�
 | 离群重估 | `GET /api/refit` | 阈值内多数点拟合、稳定复估、保留离群依据 |
 | 接缝验核 | `GET /api/seams` | 复用筛查、证明覆盖与次序、贴边独立测距 |
 | 图幅签审 | `POST /api/review/runs` | 原件勾稽、图边签审判定、批次留存 |
+| 巡检派工 | `POST /api/review/runs/{run_id}/dispatch` | 离群与超限见证聚单、跨幅去重、关闭前暂缓签审 |
 
 预检入口接收 `dataset=field` 或 `dataset=reference`，以及可选的 `control_limit_m`、`seam_limit_m`。运行接口接收同名 JSON 字段。`GET /api/review/runs/{run_id}` 回读，`POST /api/review/runs/{run_id}/signatures` 对可签图幅录名，`GET /api/review/runs/{run_id}/export` 下载一份证据。接口目录在 `/docs`。
+
+派工册按批次生成一次：`POST .../dispatch` 把本批离群控制点和超限接缝见证按 100 m 出行半径聚成派工单，同一处跨幅异常只占一条；`GET .../dispatch` 回读，`POST .../dispatch/{order_id}/closure` 由核对人逐单登记关闭。同一批重跑复用同一册，不会新增；有未关闭派工单的图幅暂缓签审。
 
 默认原件包含一个高影响离群点、冲突重测及一幅共线退化图。河西和青石桥均可拟合，但两图之间的见证偏差超限；柳湾可以签审。校准副本的 48 个控制点采信、三条边通过，四幅均可签。
 

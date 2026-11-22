@@ -14,6 +14,7 @@
 | M5 离群重估 | 查看稳健重估后的残差及排除理由 | `GET /api/refit` | `app/modules/refit/consensus.py` `app/modules/refit/service.py` | `tests/test_refit.py` |
 | M6 接缝验核 | 验证相邻边覆盖、次序与偏差 | `GET /api/seams` | `app/modules/seams/witnesses.py` `app/modules/seams/geometry.py` `app/modules/seams/service.py` | `tests/test_seams.py` |
 | M7 图幅签审 | 勾稽三表、签审、留存和导出 | `POST /api/review/runs` | `app/modules/review/decisions.py` `app/modules/review/reconcile.py` `app/modules/review/service.py` | `tests/test_review.py` |
+| M8 巡检派工 | 本批异常聚单派工、关闭前暂缓签审 | `POST /api/review/runs/{run_id}/dispatch` | `app/modules/dispatch/plan.py` `app/modules/dispatch/service.py` `app/store.py` | `tests/test_dispatch.py` |
 
 ## 陷阱登记
 
@@ -39,6 +40,9 @@
 | TRAP-28 | `sample_data/field/ground.csv` 的河西 P08 偏离 | 初算剔除误伤多点 | 稳定多数重估恢复良点 | `app/modules/refit/consensus.py` | `tests/test_refit.py::test_refit_recovers_good_points_that_initial_fit_would_drop` |
 | TRAP-29 | `sample_data/field/witness.csv` 的 `HX-QS` | 小训练残差冒充拼缝通过 | 两侧独立投影后取最大平面差 | `app/modules/seams/geometry.py` | `tests/test_seams.py::test_independent_edge_fails_even_when_both_training_residuals_are_small` |
 | TRAP-30 | `sample_data/field/witness.csv` 测试副本用旧控制点名冒充见证 | 重复证据进入独立核验 | 用规范名和像素索引排除 | `app/modules/seams/witnesses.py` | `tests/test_seams.py::test_pseudo_witness_reusing_a_control_alias_is_excluded` |
+| TRAP-31 | `HX-QS` 超限见证同属 0421、0422 两幅 | 按图幅责任各派一次，外业重复跑 | 异常以对象为键，责任图幅挂集合，一处异常一条记录 | `app/modules/dispatch/plan.py` | `tests/test_dispatch.py::test_dispatch_groups_only_nearby_anomalies_and_never_duplicates_cross_sheet` |
+| TRAP-32 | 沿边见证站首尾相距约 380 m | 单连接链式聚集把远站串进一张出行单 | 全连接凝聚，单内任意两条间距不超 100 m | `app/modules/dispatch/plan.py` | `tests/test_dispatch.py::test_complete_linkage_never_chains_distant_records` |
+| TRAP-33 | 派工册生成中途失败 | 留下半册或冲掉旧册 | 整册单事务提交，已存在即复用不重排 | `app/store.py` | `tests/test_dispatch.py::test_interrupted_generation_leaves_no_partial_booklet_and_old_version_readable` |
 
 ## 对账
 
@@ -49,3 +53,7 @@
 | 19 条拼缝见证记录 | 18 可用 + 1 隔离 |
 
 空行和重复表头各一行，未纳入逻辑记录。对账比较源行号多重集，同计数但错行也会阻断。签审沿所有登记拼缝求判定，`HX-QS` 实测超限与 `QS-SJ` 缺模型分别留证。
+
+## 巡检派工
+
+本批 1 处离群控制点（0421 P08）与 `HX-QS` 六站超限见证聚成 3 张派工单，P08 与相邻两站同单，单内最大间距不超过 100 m。每单写明责任图幅、待查对象与相邻依据（离群点列最近采信控制点，见证站列登记拼缝与相邻见证站）。无可靠位置依据的记录不进单，列入无法派工并给出原因码。派工册以批次为键只存一册，重跑复用；逐单登记关闭后，对应图幅才允许签审。

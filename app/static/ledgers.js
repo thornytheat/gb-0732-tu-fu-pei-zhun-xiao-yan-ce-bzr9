@@ -2,9 +2,11 @@ import {drawResidual} from './plots.js';
 
 export const labels = {
   PASS: '通过', FAIL: '超限', BLOCKED: '待核', FIT: '已拟合', READY: '可签', HOLD: '暂缓', RETURN: '退修',
-  SIGNED: '已签', OUTLIER: '离群', ACCEPTED: '采信', RECEIVED: '已收',
+  SIGNED: '已签', OUTLIER: '离群', ACCEPTED: '采信', RECEIVED: '已收', OPEN: '待出工', CLOSED: '已关闭',
   EMPTY_FILE: '空档', BLANK_FILE: '空行档', HEADER_ONLY: '仅表头',
 };
+const kinds = {CONTROL_OUTLIER: '离群控制点', SEAM_GAP: '超限接缝见证'};
+const sideNames = {N: '北', E: '东', S: '南', W: '西'};
 const reasons = JSON.parse(document.getElementById('reason-dictionary').textContent);
 const number = new Intl.NumberFormat('zh-CN', {minimumFractionDigits: 3, maximumFractionDigits: 3, useGrouping: false});
 export const fmt = value => value == null ? '—' : number.format(value);
@@ -131,7 +133,7 @@ function seams(root, data, activeEdge) {
   group(root, '见证行隔离', quarantined(data.quarantine));
 }
 
-function review(root, snapshot) {
+function review(root, snapshot, openSheets = new Set()) {
   const signed = new Map(snapshot.signatures.map(item => [item.sheet, item]));
   const totals = snapshot.ledger;
   const width = [totals.controls, totals.ground, totals.witnesses];
@@ -143,24 +145,146 @@ function review(root, snapshot) {
   root.append(table([['图幅'], ['校验结论'], ['拟合均方根 m', 'num'], ['关联拼缝'], ['理由'], ['签审员'], ['签审时间']],
     snapshot.reviews.map(row => {
       const signature = signed.get(row.code);
+      const held = !signature && row.status === 'READY' && openSheets.has(row.code);
       return [`${row.code} ${row.title}`, badge(signature ? 'SIGNED' : row.status), fmt(row.fit_rms_m),
-        row.edges.join(' / '), reason(row.reason), signature?.reviewer, signature?.signed_at];
+        row.edges.join(' / '), held ? '巡检未关闭，暂不签审' : reason(row.reason), signature?.reviewer, signature?.signed_at];
     })));
   group(root, '原件对账', table([['档件'], ['原件记录', 'num'], ['归属'], ['核对']],
     width.map((entry, index) => [['控制点', '地面点', '拼缝见证'][index], entry.input, sums[index], badge('PASS')])));
 }
 
-export function renderLedger(root, section, {snapshot, preview, selected, edgeId, limit}) {
+function sheetTitles(snapshot) {
+  return Object.fromEntries((snapshot?.catalog.sheets || []).map(sheet => [sheet.code, sheet.title]));
+}
+
+function dispatchError() {
+  const node = el('p', null, 'feedback');
+  node.id = 'dispatch-error';
+  node.setAttribute('role', 'alert');
+  node.hidden = true;
+  return node;
+}
+
+function metaLine(root, term, value) {
+  const item = el('div');
+  item.append(el('dt', term), el('dd', value));
+  root.append(item);
+}
+
+function itemRow(item) {
+  const detail = item.detail;
+  if (item.kind === 'CONTROL_OUTLIER')
+    return [kinds[item.kind], `${detail.sheet} ${detail.name}`, fmt(item.position[0]), fmt(item.position[1]),
+      `残差 ${fmt(detail.residual_m)} m`, `${evidence(detail.pixel_source)} · ${evidence(detail.ground_source)}`];
+  return [kinds[item.kind], `${detail.edge} ${detail.station}`, fmt(item.position[0]), fmt(item.position[1]),
+    `偏差 ${fmt(detail.gap_m)} m（限 ${fmt(detail.limit_m)}）`, evidence(detail.source)];
+}
+
+function basisText(item) {
+  const detail = item.detail;
+  if (item.kind === 'CONTROL_OUTLIER') {
+    const anchors = item.adjacent_controls.map(point => `${point.name}（${fmt(point.distance_m)} m）`).join('、');
+    return `${detail.sheet} ${detail.name}：相邻采信控制点 ${anchors || '同幅无采信控制点'}；` +
+      `登记地面 ${fmt(detail.registered_ground_m?.[0])} / ${fmt(detail.registered_ground_m?.[1])} m，现场以模型投影位置复查。`;
+  }
+  const edge = item.adjacent_edge;
+  const neighbors = item.adjacent_stations.map(station => `${station.name}（沿边 ${(station.at * 100).toFixed(1)}%）`).join('、');
+  return `${edge.code} ${detail.station}：登记拼缝 ${edge.a} ${sideNames[edge.a_side]} · ${edge.b} ${sideNames[edge.b_side]}；` +
+    `相邻见证站 ${neighbors || '无'}。`;
+}
+
+function orderCard(order, titles) {
+  const card = el('section', null, 'dispatch-order');
+  const head = el('div', null, 'order-head');
+  head.append(el('h3', `派工单 ${order.order_id}`), badge(order.closed_at ? 'CLOSED' : 'OPEN'));
+  const meta = el('dl', null, 'order-meta');
+  metaLine(meta, '责任图幅', order.sheets.map(code => `${code} ${titles[code] || ''}`.trim()).join(' / '));
+  metaLine(meta, '出行依据', `中心 ${fmt(order.centroid[0])} / ${fmt(order.centroid[1])} m · 单内最大间距 ${fmt(order.span_m)} m`);
+  const basis = el('ul', null, 'order-basis');
+  for (const item of order.items) basis.append(el('li', basisText(item)));
+  const foot = el('div', null, 'order-foot');
+  if (order.closed_at) foot.append(el('span', `已关闭 · ${order.closed_by} · ${order.closed_at}`));
+  else {
+    const close = el('button', '登记关闭', 'button outline');
+    close.type = 'button';
+    close.dataset.action = 'close-order';
+    close.dataset.order = order.order_id;
+    foot.append(close);
+  }
+  card.append(head, meta,
+    table([['类型'], ['待查对象'], ['东 m', 'num'], ['北 m', 'num'], ['量值'], ['源行']], order.items.map(itemRow)),
+    el('h4', '相邻依据', 'basis-title'), basis, foot);
+  return card;
+}
+
+function dispatchBooklet(root, {snapshot, booklet, closer}) {
+  if (!snapshot) {
+    root.append(el('p', '运行校验后查看。'));
+    return;
+  }
+  if (!booklet) {
+    root.append(el('p', '本批尚未生成派工册。外业组只跑一趟，请把本批离群控制点与超限接缝见证排成一册；同一批重跑不会另增新册。'));
+    const actions = el('div', null, 'dispatch-actions');
+    const generate = el('button', '生成本批派工册', 'button primary');
+    generate.type = 'button';
+    generate.dataset.action = 'generate-dispatch';
+    actions.append(generate);
+    root.append(actions, dispatchError());
+    return;
+  }
+  const titles = sheetTitles(snapshot);
+  const meta = el('dl', null, 'dispatch-meta');
+  metaLine(meta, '册号', booklet.run_id.slice(0, 12));
+  metaLine(meta, '生成时间', booklet.generated_at);
+  metaLine(meta, '分组半径', `${fmt(booklet.radius_m)} m`);
+  metaLine(meta, '派工单', `${booklet.orders.length} 张`);
+  metaLine(meta, '待查对象', `${booklet.orders.reduce((count, order) => count + order.items.length, 0)} 条`);
+  metaLine(meta, '无法派工', `${booklet.undispatchable.length} 条`);
+  root.append(meta);
+  if (booklet.open_sheets.length)
+    root.append(el('p', `巡检未关闭的图幅：${booklet.open_sheets.map(code => `${code} ${titles[code] || ''}`.trim()).join('、')} —— 暂不签审。`, 'dispatch-hold'));
+  if (!booklet.orders.length && !booklet.undispatchable.length)
+    root.append(el('p', '本批没有需要派工的异常记录。'));
+  for (const order of booklet.orders) root.append(orderCard(order, titles));
+  if (booklet.undispatchable.length)
+    group(root, '无法派工记录', table([['类型'], ['待查对象'], ['责任图幅'], ['无法派工原因'], ['源行']],
+      booklet.undispatchable.map(item => [
+        kinds[item.kind],
+        item.kind === 'CONTROL_OUTLIER' ? `${item.detail.sheet} ${item.detail.name}` : `${item.detail.edge} ${item.detail.station}`,
+        item.sheets.join(' / '), reason(item.reason),
+        evidence(item.kind === 'CONTROL_OUTLIER' ? item.detail.pixel_source : item.detail.source),
+      ])));
+  if (booklet.orders.some(order => !order.closed_at)) {
+    const form = el('div', null, 'closure-form');
+    const label = el('label', '核对人');
+    const input = el('input');
+    input.id = 'closer-name';
+    input.maxLength = 30;
+    input.autocomplete = 'name';
+    input.value = closer || '';
+    label.append(input);
+    form.append(label, el('span', '外业回场后填写核对人，再逐单登记关闭。'));
+    root.append(form);
+  }
+  root.append(dispatchError());
+}
+
+export function renderLedger(root, section, {snapshot, preview, selected, edgeId, limit, dispatch, closer}) {
   root.replaceChildren();
+  if (section === 'dispatch') {
+    dispatchBooklet(root, {snapshot, booklet: dispatch, closer});
+    return;
+  }
   const value = preview || (section === 'review' ? snapshot : snapshot?.[section]);
   if (!value) {
     root.append(el('p', '运行校验后查看。'));
     return;
   }
-  const renderers = {intake, coordinates, pairing, affine, refit, seams, review};
+  const renderers = {intake, coordinates, pairing, affine, refit, seams};
   if (section === 'intake') intake(root, preview ? value.tables : value);
   else if (section === 'affine') affine(root, preview ? value.sheets : value, snapshot?.pairing.pairs || []);
   else if (section === 'refit') refit(root, value, selected, limit);
   else if (section === 'seams') seams(root, value, edgeId);
+  else if (section === 'review') review(root, value, new Set(dispatch?.open_sheets || []));
   else renderers[section](root, value);
 }
